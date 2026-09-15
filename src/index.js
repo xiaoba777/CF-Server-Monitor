@@ -1,4 +1,5 @@
 import { initDatabase, weeklyCleanup, getMetricsHistory, clearHistory } from './database/schema.js';
+import { withDatabase } from './database/postgres.js';
 import { checkOfflineNodes, checkExpiringServers, checkResourceAlerts } from './services/notification.js';
 import { updateDatabase } from './database/updateDatabase.js';
 import { handleAdminAPI } from './handlers/admin.js';
@@ -174,6 +175,7 @@ async function fetchHistoryData(env, request, id, hours, columns, sys = null) {
 
 export default {
   async fetch(request, env, ctx) {
+    env = withDatabase(env);
     setDebug(env.DEBUG);
 
     const url = new URL(request.url);
@@ -456,6 +458,7 @@ export default {
   },
 
   async scheduled(event, env, ctx) {
+    env = withDatabase(env);
     const cron = event.cron;
     debug(`[Cron] 定时任务触发: ${cron}`);
 

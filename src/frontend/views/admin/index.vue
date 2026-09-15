@@ -160,6 +160,7 @@
           :trans="trans"
           :active-tab="activeTab"
           :db-loading="dbLoading"
+          :database-backend="settings.database_backend"
           :selected-api-index="selectedApiIndex"
           @open-db-modal="openDbModal"
         />

@@ -1,5 +1,6 @@
 import { buildAuthCookie, buildClearAuthCookie, checkAuth, simpleAuthResponse, validateCredentials, generateToken } from '../middleware/auth.js';
 import { getLatestMetricsForAllServers } from '../database/schema.js';
+import { isPostgres } from '../database/postgres.js';
 import { getAllServers, clearServersListCache } from '../utils/cache.js';
 import { clearAppearanceSettingsCache, isValidThemeOptions, isWssReportConfigured, isWssReportEnabled, normalizeBooleanSetting, normalizeDefaultLanguage, normalizeDisplayMode, normalizeExpireNotificationTime, normalizeExpireReminder, normalizeFrontendWsTimeoutMinutes, normalizeLongHistoryPoints, normalizeNotificationTemplate, normalizeNotificationTimezone, normalizeNotificationWebhookBody, normalizeNotificationWebhookFormat, normalizeNotificationWebhookHeaders, normalizeNotificationWebhookMethod, normalizePreferredTheme, normalizeResourceAlertRules, normalizeTgNotify, normalizeWssReportHours, saveSiteOptions, saveThemeOptions, SITE_FIELDS, APPEARANCE_FIELDS } from '../utils/settings.js';
 import { mergeMetricsIntoServer } from '../utils/metrics.js';
@@ -228,6 +229,15 @@ async function validateThemeUrlAvailable(themeUrl) {
 }
 
 async function deleteServer(db, id) {
+  if (isPostgres(db)) {
+    await db.batch([
+      db.prepare('SELECT id FROM servers WHERE id = ? FOR UPDATE').bind(id),
+      db.prepare('DELETE FROM metrics_history WHERE server_id = ?').bind(id),
+      db.prepare('DELETE FROM metrics_history_old WHERE server_id = ?').bind(id),
+      db.prepare('DELETE FROM servers WHERE id = ?').bind(id)
+    ]);
+    return;
+  }
   try {
     const stmt1 = db.prepare(`PRAGMA foreign_key_list(metrics_history)`);
     const result1 = await stmt1.all();
@@ -547,7 +557,7 @@ async function handleGetSettingsAction({ env, sys, loadFullSettings }) {
   const { jwt_secret, ...safeSettings } = fullSettings || {};
   return createSuccessResponse({
     success: true,
-    settings: safeSettings,
+    settings: { ...safeSettings, database_backend: isPostgres(env.DB) ? 'postgres' : 'd1' },
     api_secret: env.API_SECRET
   });
 }
@@ -656,7 +666,10 @@ async function handleListAction({ env }) {
   });
 }
 
-async function handleD1UsageAction({ data, sys }) {
+async function handleD1UsageAction({ data, sys, env }) {
+  if (isPostgres(env?.DB)) {
+    return createBadRequestResponse('D1 usage is unavailable for PostgreSQL. Monitor PostgreSQL and Hyperdrive separately.');
+  }
   const hasCloudflareToken = Object.prototype.hasOwnProperty.call(data, 'cloudflare_token');
   const hasCloudflareAccountId = Object.prototype.hasOwnProperty.call(data, 'cloudflare_account_id');
   const cloudflareToken = hasCloudflareToken ? data.cloudflare_token : (sys?.cloudflare_token || '');

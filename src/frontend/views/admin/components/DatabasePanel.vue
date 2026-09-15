@@ -2,12 +2,15 @@
   <div id="tab-database" class="tab-content" :class="{ active: activeTab === 'database' }">
     <div class="settings-section">
       <div class="section-title"><span>▸</span> {{ trans.dbManagement }}</div>
+      <p v-if="databaseBackend === 'postgres'" class="text-muted mb-2">
+        PostgreSQL: schema upgrades must be applied offline. Clearing history permanently removes both history tables' data without changing the schema.
+      </p>
 
       <div class="settings-grid">
         <div class="form-group">
           <label class="form-label">{{ trans.upgradeDatabase }}</label>
           <p class="text-muted mb-2">{{ trans.upgradeDesc }}</p>
-          <button @click="$emit('open-db-modal', 'upgrade')" class="btn btn-primary btn-lg" :disabled="dbLoading">⬆️ {{ trans.upgradeDatabase }}</button>
+          <button @click="$emit('open-db-modal', 'upgrade')" class="btn btn-primary btn-lg" :disabled="dbLoading || databaseBackend === 'postgres'">⬆️ {{ trans.upgradeDatabase }}</button>
         </div>
 
         <div class="form-group">
@@ -74,6 +77,7 @@ const props = defineProps({
   trans: { type: Object, required: true },
   activeTab: { type: String, default: 'database' },
   dbLoading: { type: Boolean, default: false },
+  databaseBackend: { type: String, default: 'd1' },
   selectedApiIndex: { type: Number, default: 0 }
 })
 

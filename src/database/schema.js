@@ -3,8 +3,12 @@ import { saveSiteOptions, debug, getSettingByKey, normalizeLongHistoryPoints, DE
 import { attachDiskMetricsObject, flattenDiskMetrics, isDisabledProbeMetric, normalizeProbeMetricRow } from '../utils/metrics.js';
 import { ensureServerOptimization, buildHistoryId, getServerHistoryInfo, getHistoryIdRange } from './indexOptimization.js';
 import { addHistoryColumns, ensureHistoryIndex, isHistoryOptimized } from './updateDatabase.js';
+import { isPostgres } from './postgres.js';
+import { validatePostgresSchema } from './postgresSchema.js';
 import {
   buildSparseHistoryQuery,
+  buildPostgresSparseHistoryQuery,
+  validateHistoryColumns,
   shouldUseSparseHistorySampling
 } from './historySampling.js';
 import {
@@ -49,6 +53,7 @@ export function clearDashboardLatencyHistoryCache() {
 }
 
 export async function initDatabase(db) {
+  if (isPostgres(db)) return validatePostgresSchema(db);
   if (dbInitialized) return;
 
   debug('初始化数据库');
@@ -136,6 +141,19 @@ export async function initDatabase(db) {
 }
 
 export async function clearHistory(db) {
+  if (isPostgres(db)) {
+    try {
+      await db.transaction(async database => {
+        // One statement locks both tables together; no intermediate missing table.
+        await database.prepare('TRUNCATE TABLE metrics_history, metrics_history_old').run();
+      });
+      await clearAllCaches(db);
+      clearDashboardLatencyHistoryCache();
+      return { success: true, message: 'databaseRebuiltSuccess' };
+    } catch (error) {
+      return { success: false, message: 'databaseRebuiltFailed', error: error.message };
+    }
+  }
   debug('开始清空历史数据...');
   
   try {
@@ -185,7 +203,7 @@ async function hasHistoryServerTimeIndex(db, tableName) {
   return !!index;
 }
 
-function buildHistorySourceQuery(tableName, useIdRange, columns) {
+function buildHistorySourceQuery(tableName, useIdRange, columns, db) {
   if (useIdRange) {
     return `
       SELECT timestamp, ${columns} FROM ${tableName}
@@ -197,7 +215,7 @@ function buildHistorySourceQuery(tableName, useIdRange, columns) {
   return `
     SELECT timestamp, ${columns} FROM ${tableName}
     WHERE server_id = ?
-      AND typeof(timestamp) = 'integer'
+      ${isPostgres(db) ? '' : "AND typeof(timestamp) = 'integer'"}
       AND timestamp >= ?
   `;
 }
@@ -236,16 +254,16 @@ export async function getMetricsHistory(
   const thisSunday = new Date(Date.UTC(nowDate.getUTCFullYear(), nowDate.getUTCMonth(), nowDate.getUTCDate() - day));
   const needOldTable = queryStart < thisSunday.getTime();
   
-  const oldTableExists = needOldTable && !!await db.prepare(
+  const oldTableExists = isPostgres(db) || (needOldTable && !!await db.prepare(
     `SELECT name FROM sqlite_master WHERE type='table' AND name='metrics_history_old'`
-  ).first();
+  ).first());
 
   const history_id_optimized = await getSettingByKey(db, 'history_id_optimized', true);
-  const currentHasServerTimeIndex = history_id_optimized
+  const currentHasServerTimeIndex = isPostgres(db) ? true : history_id_optimized
     ? false
     : await hasHistoryServerTimeIndex(db, 'metrics_history');
-  const currentUsesIdRange = history_id_optimized || !currentHasServerTimeIndex;
-  const oldUsesIdRange = oldTableExists
+  const currentUsesIdRange = !isPostgres(db) && (history_id_optimized || !currentHasServerTimeIndex);
+  const oldUsesIdRange = !isPostgres(db) && oldTableExists
     ? history_id_optimized || !await hasHistoryServerTimeIndex(db, 'metrics_history_old')
     : false;
   const needsIdRange = currentUsesIdRange || oldUsesIdRange;
@@ -259,17 +277,17 @@ export async function getMetricsHistory(
     idRange = getHistoryIdRange(historyInfo.partitionId, queryStart);
   }
 
-  const columnList = columns.split(',').map(c => c.trim()).filter(c => c && c !== 'timestamp');
+  const columnList = validateHistoryColumns(columns).filter(column => column !== 'timestamp');
   const sourceColumns = columnList.join(', ');
   const lossColumns = columnList.filter(col => LOSS_AGG_COLUMNS.has(col));
-  const lossWindowExpressions = lossColumns.map(col =>
-    `MAX(${col}) OVER (PARTITION BY bucket) AS ${col}_bucket_max`
-  );
+  const lossWindowExpressions = lossColumns.map(col => isPostgres(db)
+    ? `CASE WHEN MIN(${col}) OVER (PARTITION BY bucket) = -1 THEN -1 ELSE MAX(${col}) OVER (PARTITION BY bucket) END AS ${col}_bucket_max`
+    : `MAX(${col}) OVER (PARTITION BY bucket) AS ${col}_bucket_max`);
   const selectColumns = columnList.map(col =>
     LOSS_AGG_COLUMNS.has(col) ? `${col}_bucket_max AS ${col}` : col
   );
 
-  const useSparseSampling = shouldUseSparseHistorySampling(
+  const useSparseSampling = isPostgres(db) ? queryHours > 1 : shouldUseSparseHistorySampling(
     queryHours,
     currentUsesIdRange,
     oldTableExists,
@@ -306,7 +324,8 @@ export async function getMetricsHistory(
       queryStart + intervalMs
     );
     const idPrefix = getHistoryIdRange(historyInfo.partitionId).startId;
-    const sparseQuery = buildSparseHistoryQuery({
+    const sparseQuery = (isPostgres(db) ? buildPostgresSparseHistoryQuery : buildSparseHistoryQuery)({
+      serverId,
       columns: sourceColumns,
       queryStart,
       queryEnd,
@@ -323,13 +342,13 @@ export async function getMetricsHistory(
       ...sparseResult,
       results: sparseResult.results
         .filter(row => row.sample_json)
-        .map(row => JSON.parse(row.sample_json))
+        .map(row => typeof row.sample_json === 'string' ? JSON.parse(row.sample_json) : row.sample_json)
     };
   } else {
     const sourceQueries = [];
     const bindValues = [];
 
-    sourceQueries.push(buildHistorySourceQuery('metrics_history', currentUsesIdRange, sourceColumns));
+    sourceQueries.push(buildHistorySourceQuery('metrics_history', currentUsesIdRange, sourceColumns, db));
     if (currentUsesIdRange) {
       bindValues.push(idRange.startId, idRange.endId);
     } else {
@@ -338,7 +357,7 @@ export async function getMetricsHistory(
 
     if (oldTableExists) {
       debug('[History] 跨周查询，合并 metrics_history 和 metrics_history_old');
-      sourceQueries.push(buildHistorySourceQuery('metrics_history_old', oldUsesIdRange, sourceColumns));
+      sourceQueries.push(buildHistorySourceQuery('metrics_history_old', oldUsesIdRange, sourceColumns, db));
       if (oldUsesIdRange) {
         bindValues.push(idRange.startId, idRange.endId);
       } else {
@@ -356,7 +375,7 @@ export async function getMetricsHistory(
         SELECT
           timestamp,
           ${sourceColumns},
-          CAST(timestamp / ? AS INTEGER) AS bucket
+          ${isPostgres(db) ? 'timestamp / ?::bigint' : 'CAST(timestamp / ? AS INTEGER)'} AS bucket
         FROM history_rows
       ),
       sampled AS (
@@ -439,7 +458,7 @@ function normalizeDashboardLatencyRows(rows, options = {}) {
 function parseDashboardLatencySample(row) {
   if (!row?.sample_json) return null;
   try {
-    return JSON.parse(row.sample_json);
+    return typeof row.sample_json === 'string' ? JSON.parse(row.sample_json) : row.sample_json;
   } catch (_) {
     return null;
   }
@@ -501,9 +520,9 @@ export async function getDashboardLatencyHistory(db, servers, options = {}) {
   const nowDate = new Date(now);
   const day = nowDate.getUTCDay();
   const thisSunday = new Date(Date.UTC(nowDate.getUTCFullYear(), nowDate.getUTCMonth(), nowDate.getUTCDate() - day));
-  const oldTableExists = cutoff < thisSunday.getTime() && !!await db.prepare(
+  const oldTableExists = isPostgres(db) || (cutoff < thisSunday.getTime() && !!await db.prepare(
     `SELECT name FROM sqlite_master WHERE type='table' AND name='metrics_history_old'`
-  ).first();
+  ).first());
 
   const fetchServerLatency = async server => {
     const serverId = String(server?.id || '').trim();
@@ -525,7 +544,8 @@ export async function getDashboardLatencyHistory(db, servers, options = {}) {
       const intervalMs = Math.max(10_000, Math.ceil((queryEnd - queryStart) / points));
       const idPrefix = getHistoryIdRange(historyInfo.partitionId).startId;
       const querySparseHistory = async queryColumns => {
-        const sparseQuery = buildSparseHistoryQuery({
+        const sparseQuery = (isPostgres(db) ? buildPostgresSparseHistoryQuery : buildSparseHistoryQuery)({
+          serverId,
           columns: queryColumns,
           queryStart,
           queryEnd,
@@ -575,6 +595,19 @@ export async function getDashboardLatencyHistory(db, servers, options = {}) {
 
 
 export async function weeklyCleanup(db) {
+  if (isPostgres(db)) {
+    // Preserve the D1 retention window (previous Sunday onwards) without DDL races.
+    const now = new Date();
+    const cutoff = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - now.getUTCDay() - 7);
+    try {
+      await db.batch(['metrics_history', 'metrics_history_old'].map(tableName =>
+        db.prepare(`DELETE FROM ${tableName} WHERE timestamp < ?`).bind(cutoff)));
+      clearDashboardLatencyHistoryCache();
+      return { success: true, message: 'History retention cleanup completed' };
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  }
   try {
     debug('[Cleanup] 开始执行表轮换操作...');
     
@@ -626,7 +659,7 @@ export async function saveMetricsHistory(db, serverId, historyPartitionId, metri
     ? (rawTimestamp < 10000000000 ? rawTimestamp * 1000 : rawTimestamp)
     : Date.now();
 
-  const DISABLED_PROBE_VALUE = 'false';
+  const DISABLED_PROBE_VALUE = isPostgres(db) ? -1 : 'false';
 
   const parsePing = (val) => {
     if (isDisabledProbeMetric(val)) return DISABLED_PROBE_VALUE;
@@ -641,15 +674,16 @@ export async function saveMetricsHistory(db, serverId, historyPartitionId, metri
     return Math.max(0, Math.min(100, num));
   };
 
-  const insertHistoryRow = async () => {
+  const insertHistoryRow = async (database = db) => {
     const diskMetrics = flattenDiskMetrics(metrics);
 
-    await db.prepare(`
+    await database.prepare(`
     INSERT INTO metrics_history (
       ${HISTORY_INSERT_COLUMNS.join(', ')}
     ) VALUES (
       ${HISTORY_INSERT_COLUMNS.map(() => '?').join(', ')}
     )
+    ${isPostgres(db) ? 'ON CONFLICT (id) DO NOTHING' : ''}
   `).bind(
     historyId,
     serverId,
@@ -708,8 +742,21 @@ export async function saveMetricsHistory(db, serverId, historyPartitionId, metri
   };
 
   try {
+    if (isPostgres(db)) {
+      await db.transaction(async database => {
+        // Serialize deletion/reassignment with writes from stale DO/Worker caches.
+        const server = await database.prepare(`SELECT history_partition_id FROM servers
+          WHERE id = ? FOR KEY SHARE`).bind(serverId).first();
+        if (!server || Number(server.history_partition_id) !== Number(historyPartitionId)) {
+          throw new Error('Server history partition changed or server was deleted');
+        }
+        await insertHistoryRow(database);
+      });
+      return;
+    }
     await insertHistoryRow();
   } catch (e) {
+    if (isPostgres(db)) throw e;
     if (e?.message && /has no column/i.test(e.message)) {
       console.warn('检测到数据库字段缺失，尝试添加缺失字段...');
       await addHistoryColumns(db);
@@ -726,6 +773,16 @@ export async function saveMetricsHistory(db, serverId, historyPartitionId, metri
 
 export async function getLatestMetrics(db, serverId, server = null) {
   try {
+    if (isPostgres(db)) {
+      const result = await db.prepare(`
+        SELECT * FROM (
+          (SELECT * FROM metrics_history WHERE server_id = ? ORDER BY timestamp DESC, id DESC LIMIT 1)
+          UNION ALL
+          (SELECT * FROM metrics_history_old WHERE server_id = ? ORDER BY timestamp DESC, id DESC LIMIT 1)
+        ) AS latest ORDER BY timestamp DESC, id DESC LIMIT 1
+      `).bind(serverId, serverId).first();
+      return result ? normalizeProbeMetricRow(result) : null;
+    }
     const historyInfo = await getServerHistoryInfo(db, serverId, server);
     if (!historyInfo.partitionId) {
       throw new Error('Invalid history partition id');

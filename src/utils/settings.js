@@ -3,6 +3,8 @@ import {
   JWT_SECRET_MIN_LENGTH,
   SITE_SETTINGS_CACHE_TTL_MS
 } from './config.js';
+import { isPostgres } from '../database/postgres.js';
+import { savePostgresJwtSecret, savePostgresThemeOptions } from '../database/postgresSettings.js';
 
 export const APPEARANCE_FIELDS = ['site_title', 'custom_bg', 'custom_bg_mobile', 'favicon', 'custom_head', 'custom_script', 'csp_static', 'csp_api', 'display_mode', 'preferred_theme', 'default_language', 'theme_options'];
 
@@ -576,6 +578,7 @@ async function loadLegacySettings(db, fields) {
 }
 
 async function saveJwtSecretIfMissing(db, secret) {
+  if (isPostgres(db)) return savePostgresJwtSecret(db, secret, JWT_SECRET_MIN_LENGTH);
   await db.prepare(`
     INSERT INTO settings (key, value)
     VALUES ('site_options', json_object('jwt_secret', ?))
@@ -661,6 +664,7 @@ export async function loadSiteSettings(db, options = {}) {
     result.expire_notification_time = normalizeExpireNotificationTime(result.expire_notification_time);
   } catch (e) {
     console.error('加载站点设置失败:', e);
+    if (isPostgres(db)) throw e;
   }
 
   cachedSiteSettings = result;
@@ -707,6 +711,7 @@ export async function loadAppearanceOptions(db) {
     result.default_language = normalizeDefaultLanguage(result.default_language);
   } catch (e) {
     console.error('加载外观设置失败:', e);
+    if (isPostgres(db)) throw e;
   }
 
   cachedAppearanceOptions = result;
@@ -724,6 +729,11 @@ export function isValidThemeOptions(value) {
 }
 
 export async function saveThemeOptions(db, themeOptions) {
+  if (isPostgres(db)) {
+    await savePostgresThemeOptions(db, themeOptions);
+    clearAppearanceSettingsCache();
+    return themeOptions;
+  }
   await db.prepare(
     `INSERT INTO settings (key, value)
      VALUES ('appearance_options', json_object('theme_options', json(?)))

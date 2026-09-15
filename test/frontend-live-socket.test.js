@@ -35,6 +35,8 @@ class FakeWebSocket {
 
 test('frontend WebSocket closes at its lifetime limit without reconnecting', async () => {
   const vite = await createServer({
+    // Unit tests must not install development certificates or prompt for sudo.
+    configFile: false,
     appType: 'custom',
     logLevel: 'silent',
     server: { middlewareMode: true }

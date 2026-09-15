@@ -106,7 +106,7 @@ export function attachDiskMetricsObject(metrics) {
 }
 
 export function isDisabledProbeMetric(value) {
-  return value === false || value === 'false';
+  return value === false || value === 'false' || value === -1 || value === '-1';
 }
 
 // 将探针上报的指标字段统一转换为数字类型，与 /api/servers 的 servers[] 字段类型保持一致。

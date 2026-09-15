@@ -12,7 +12,10 @@
     "build:frontend": "node scripts/build.js",
     "build:github-page": "node scripts/build-github-page.js",
     "test": "node --test test/admin-usage.test.js test/dashboard-latency-window.test.js test/frontend-api-base.test.js test/frontend-live-socket.test.js test/metrics-broadcaster-agent-config.test.js",
-    "test:all": "npm run test && npm run test:agent-config && npm run test:history-query",
+    "test:all": "npm run test && npm run test:agent-config && npm run test:history-query && npm run test:postgres && npm run test:deployment",
+    "test:postgres": "node --test test/postgres.test.js test/postgres.integration.test.js scripts/migrate-d1-to-postgres.test.js",
+    "test:deployment": "node --test scripts/create-deploy-config.test.js scripts/postgres-integration.test.js",
+    "deploy:config": "node scripts/create-deploy-config.js",
     "test:agent-config": "node test/agent-config.js",
     "test:history-query": "node --test test/history-query.test.js",
     "preview": "vite preview"
@@ -27,6 +30,7 @@
   "author": "",
   "license": "MIT",
   "devDependencies": {
+    "@electric-sql/pglite": "^0.5.8",
     "@vitejs/plugin-vue": "^6.0.0",
     "fs-extra": "^11.3.5",
     "vite": "^6.0.0",
@@ -37,6 +41,7 @@
     "chart.js": "^4.4.0",
     "chartjs-adapter-date-fns": "^3.0.0",
     "leaflet": "^1.9.4",
+    "pg": "^8.23.0",
     "vue": "^3.4.0",
     "vue-router": "^4.4.0"
   },

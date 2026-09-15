@@ -1,4 +1,52 @@
+import { HISTORY_INSERT_COLUMNS } from '../utils/historyFields.js';
+
 const SPARSE_HISTORY_MIN_HOURS = 1;
+
+export function validateHistoryColumns(columns) {
+  const columnList = columns.split(',').map(column => column.trim()).filter(Boolean);
+  if (!columnList.some(column => column !== 'timestamp') || columnList.some(column => !HISTORY_INSERT_COLUMNS.includes(column))) {
+    throw new Error('Invalid history columns');
+  }
+  return columnList;
+}
+
+// Timestamp index seeks also support imported legacy IDs. Explicit BIGINT parameters
+// avoid PostgreSQL inferring text/32-bit integers; no timezone/date conversion is needed.
+export function buildPostgresSparseHistoryQuery({ columns, serverId, queryStart, queryEnd, firstRangeEnd, intervalMs, oldTableExists, sampleOrder = 'ASC' }) {
+  const columnList = validateHistoryColumns(columns).filter(column => column !== 'timestamp');
+  if (!serverId || ![queryStart, queryEnd, firstRangeEnd, intervalMs].every(Number.isFinite)
+    || intervalMs < 1 || firstRangeEnd <= queryStart || queryEnd <= queryStart) {
+    throw new Error('Invalid sparse history range');
+  }
+  const bindValues = [];
+  const ranges = [];
+  let rangeStart = queryStart;
+  let rangeEnd = Math.min(firstRangeEnd, queryEnd);
+  while (rangeStart < queryEnd) {
+    if (ranges.length >= 1000) throw new Error('Too many history buckets');
+    ranges.push('(?::bigint, ?::bigint)');
+    bindValues.push(Math.floor(rangeStart), Math.floor(rangeEnd));
+    rangeStart = rangeEnd;
+    rangeEnd = Math.min(queryEnd, rangeEnd + intervalMs);
+  }
+  const order = String(sampleOrder).toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
+  const tables = oldTableExists ? ['metrics_history', 'metrics_history_old'] : ['metrics_history'];
+  const sources = tables.map(tableName => {
+    bindValues.push(serverId);
+    return `(SELECT timestamp, ${columnList.join(', ')} FROM ${tableName}
+      WHERE server_id = ? AND timestamp >= ranges.range_start AND timestamp < ranges.range_end
+      ORDER BY timestamp ${order}, id ${order} LIMIT 1)`;
+  });
+  return {
+    sql: `WITH ranges(range_start, range_end) AS (VALUES ${ranges.join(', ')})
+      SELECT (SELECT row_to_json(sample) FROM (
+        SELECT * FROM (${sources.join(' UNION ALL ')}) AS candidates
+        ORDER BY timestamp ${order} LIMIT 1
+      ) AS sample) AS sample_json
+      FROM ranges ORDER BY range_start ASC`,
+    bindValues
+  };
+}
 
 export function shouldUseSparseHistorySampling(
   queryHours,
@@ -33,7 +81,7 @@ export function buildSparseHistoryQuery({
   tableBoundary,
   sampleOrder = 'ASC'
 }) {
-  const columnList = columns.split(',').map(column => column.trim()).filter(Boolean);
+  const columnList = validateHistoryColumns(columns);
   const jsonColumns = ['timestamp', ...columnList]
     .flatMap(column => [`'${column}'`, column])
     .join(', ');

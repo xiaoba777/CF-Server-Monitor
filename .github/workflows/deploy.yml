@@ -10,6 +10,13 @@ on:
       - 'LICENSE'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: monitor-production-deploy
+  cancel-in-progress: false
+
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -32,6 +39,7 @@ jobs:
     if: needs.check.outputs.should_deploy == 'true'
     runs-on: ubuntu-latest
     name: Deploy
+    environment: production
     steps:
       - name: 📥 Checkout code
         uses: actions/checkout@v4
@@ -42,56 +50,23 @@ jobs:
           node-version: '22'
 
       - name: 📦 Install dependencies
-        run: npm install
+        run: npm ci
+
+      - name: Test database and application behavior
+        run: npm run test:all
 
       - name: 🏗️ Build frontend assets
         run: npm run build:frontend
 
       - name: 📝 Create wrangler.toml
-        run: |
-          cat > wrangler.toml << 'WEOF'
-          name = "server-monitor-pro"
-          main = "src/index.js"
-          compatibility_date = "2024-12-01"
-          compatibility_flags = ["nodejs_compat"]
-
-          # 定时任务配置（UTC）
-          # - 每分钟：执行离线节点检测
-          # - 每小时：合并执行其他定时任务（每月1号数据清理、每月8号清理旧表、每天12点服务器到期检测）
-          [triggers]
-          crons = ["*/1 * * * *", "0 * * * *"]
-
-          [assets]
-          directory = "./dist"
-          binding = "ASSETS"
-
-          [[d1_databases]]
-          binding = "DB"
-          database_name = "server-monitor-db"
-          database_id = "D1_PLACEHOLDER"
-
-          # Durable Objects：实时指标广播中心
-          [[durable_objects.bindings]]
-          name = "METRICS_BROADCASTER"
-          class_name = "MetricsBroadcaster"
-
-          [[migrations]]
-          tag = "v1"
-          new_sqlite_classes = ["MetricsBroadcaster"]
-
-          [vars]
-          API_SECRET = "SECRET_PLACEHOLDER"
-          API_USER_NAME = "USER_NAME_PLACEHOLDER"
-          CORS_ALLOWED_ORIGINS = "CORS_ORIGINS_PLACEHOLDER"
-          WEOF
-
-          # 替换占位符
-          sed -i "s|D1_PLACEHOLDER|${{ secrets.D1_DATABASE_ID }}|g" wrangler.toml
-          sed -i "s|SECRET_PLACEHOLDER|${{ secrets.API_SECRET }}|g" wrangler.toml
-          sed -i "s|USER_NAME_PLACEHOLDER|${{ secrets.API_USER_NAME }}|g" wrangler.toml
-          sed -i "s|CORS_ORIGINS_PLACEHOLDER|${{ secrets.CORS_ALLOWED_ORIGINS }}|g" wrangler.toml
-
-          echo "✅ wrangler.toml 已生成"
+        run: node scripts/create-deploy-config.js
+        env:
+          WORKER_NAME: ${{ vars.WORKER_NAME }}
+          DATABASE_BACKEND: ${{ vars.DATABASE_BACKEND || 'd1' }}
+          HYPERDRIVE_ID: ${{ secrets.HYPERDRIVE_ID }}
+          D1_DATABASE_ID: ${{ secrets.D1_DATABASE_ID }}
+          API_USER_NAME: ${{ secrets.API_USER_NAME }}
+          CORS_ALLOWED_ORIGINS: ${{ secrets.CORS_ALLOWED_ORIGINS }}
 
       # wrangler v4 的 `deploy` 会自动根据 wrangler.toml 中的 [[durable_objects.bindings]]
       # 声明创建 DO namespace（幂等：已存在则跳过），无需单独命令。
@@ -102,7 +77,11 @@ jobs:
           apiToken: ${{ secrets.CF_API_TOKEN }}
           accountId: ${{ secrets.CF_ACCOUNT_ID }}
           wranglerVersion: '4'
-          command: deploy
+          command: deploy --config wrangler.deploy.json
+          secrets: |
+            API_SECRET
+        env:
+          API_SECRET: ${{ secrets.API_SECRET }}
 
       - name: ✅ Deployment Success
         if: success()

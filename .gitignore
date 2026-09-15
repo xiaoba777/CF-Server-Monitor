@@ -16,6 +16,10 @@ pnpm-lock.yaml
 .env
 .env.local
 .env.*.local
+.dev.vars
+.dev.vars.*
+backups/
+wrangler.deploy.json
 
 # IDE
 .vscode/

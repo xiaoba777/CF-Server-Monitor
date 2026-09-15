@@ -13,6 +13,7 @@
 // - Agent 上报连接使用标准 WebSocket API，避免高频指标消息计为 hibernation wakeup。
 
 import { saveMetricsHistory } from '../database/schema.js';
+import { withDatabase } from '../database/postgres.js';
 import { ensureServerOptimization } from '../database/indexOptimization.js';
 import { getServerDetail, clearServerDetailCache } from '../utils/cache.js';
 import { getWssReportScheduleState, loadSiteSettings } from '../utils/settings.js';
@@ -272,7 +273,7 @@ function hasSufficientResourceAlertSamples(samples, windowMinutes) {
 export class MetricsBroadcaster {
   constructor(state, env) {
     this.state = state;
-    this.env = env;
+    this.env = withDatabase(env);
     // 仅用于新页面快速接上最近一包数据；DO 重启或休眠回收后允许自然丢失。
     this.latestReportUpdates = new Map();
     this.resourceAlertWindows = new Map();

@@ -7,9 +7,11 @@ import {
   normalizePrice
 } from '../utils/serverBilling.js';
 import { HISTORY_UPGRADE_COLUMNS } from '../utils/historyFields.js';
+import { isPostgres, POSTGRES_MIGRATION_REQUIRED } from './postgres.js';
 
 
 export async function updateDatabase(db) {
+  if (isPostgres(db)) return { success: false, message: POSTGRES_MIGRATION_REQUIRED, results: [] };
   debug('开始执行数据库更新...');
   const results = [];
   
@@ -53,6 +55,7 @@ export async function updateDatabase(db) {
 }
 
 export async function isHistoryOptimized(db) {
+  if (isPostgres(db)) return false; // PostgreSQL uses the server/timestamp index, including legacy imports.
   const history_id_optimized = await getSettingByKey(db, 'history_id_optimized', true);
   if(history_id_optimized) return true;
   const minId = await db.prepare(`
@@ -67,6 +70,7 @@ export async function isHistoryOptimized(db) {
 
 // 确保 旧版metrics_history 表有索引
 export async function ensureHistoryIndex(db) {
+  if (isPostgres(db)) return { success: true, created: false, message: 'Indexes managed by offline migrations' };
   const history_id_optimized = await getSettingByKey(db, 'history_id_optimized', true);
   if(history_id_optimized) {
     debug('metrics_history 表已优化，无需创建索引');
@@ -116,6 +120,7 @@ export async function ensureHistoryIndex(db) {
 }
 
 export async function addServerColumns(db) {
+  if (isPostgres(db)) throw new Error(POSTGRES_MIGRATION_REQUIRED);
   try {
     const { results: columns } = await db.prepare(`PRAGMA table_info(servers)`).all();
     const existingCols = columns.map(c => c.name);
@@ -213,6 +218,7 @@ async function cleanupServerExtraColumns(db) {
 }
 
 export async function addHistoryColumns(db) {
+  if (isPostgres(db)) throw new Error(POSTGRES_MIGRATION_REQUIRED);
   try {
     const newHistoryCols = HISTORY_UPGRADE_COLUMNS;
 

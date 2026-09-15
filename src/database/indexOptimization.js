@@ -1,5 +1,6 @@
 import { saveSiteOptions, debug, getSettingByKey } from '../utils/settings.js';
 import { getAllServers, clearServersListCache } from '../utils/cache.js';
+import { isPostgres, POSTGRES_MIGRATION_REQUIRED } from './postgres.js';
 
 export const HISTORY_PARTITION_MULTIPLIER = 10000000000000;
 export const HISTORY_AUTO_OPTIMIZED_MIN_ID = HISTORY_PARTITION_MULTIPLIER;
@@ -8,6 +9,12 @@ export const HISTORY_MAX_TIME_KEY = 991231235959;
 
 // 确保servers历史记录分区优化
 export async function ensureServerOptimization(db) {
+  if (isPostgres(db)) {
+    const invalid = await db.prepare(`SELECT id FROM servers
+      WHERE history_partition_id IS NULL OR history_partition_id NOT BETWEEN 1 AND 900 LIMIT 1`).first();
+    if (invalid) throw new Error(POSTGRES_MIGRATION_REQUIRED);
+    return { success: true, assigned: 0 };
+  }
   const optimized = await getSettingByKey(db, 'servers_optimized', true);
   const { results: columns = [] } = await db.prepare(`PRAGMA table_info(servers)`).all();
   const existingColumns = new Set(columns.map(column => column.name));
@@ -82,7 +89,9 @@ export async function ensureServerOptimization(db) {
 
 // 获取下一个可用的历史记录分区ID
 export async function getNextServerHistoryPartitionId(db) {
-  const servers = await getAllServers(db, true);
+  const servers = isPostgres(db)
+    ? (await db.prepare('SELECT history_partition_id FROM servers').all()).results
+    : await getAllServers(db, true);
   const usedIds = new Set(
     servers
       .map(s => Number(s.history_partition_id))

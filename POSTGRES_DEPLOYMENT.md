@@ -32,6 +32,13 @@ Do not publish port 5432 to the entire Internet. A Tunnel does not remove the
 documented database TLS prerequisite. Do not change the shared container's
 network or restart it without assessing impact on its existing application.
 
+`scripts/postgres-enable-tls-shared-instance.sh` enables optional PostgreSQL TLS
+on the shared instance with a private CA. It reloads configuration and does not
+require TLS for existing 3x-ui connections. Hyperdrive cannot use the default
+WebPKI `require` mode with this certificate: upload `/root/.cf-server-monitor/tls/ca.crt`
+and use `verify-ca`. Reissue the server certificate before `verify-full` if the
+Tunnel hostname is not already in the certificate SAN.
+
 ## Database and credentials
 
 Review `scripts/postgres-provision.sql` before executing it. It creates only
